@@ -32,6 +32,8 @@ jobs:
 
       - name: Trigger Bugbot (capture comment id)
         id: trigger
+        env:
+          GH_TOKEN: ${{ secrets.BUGBOT_TRIGGER_PAT }}   # post as a human so Bugbot honors it
         run: |
           # post the trigger and grab the new comment's id from the API
           before=$(gh api "repos/$REPO/issues/$PR/comments" --jq 'map(.id) | max // 0')
@@ -61,6 +63,8 @@ jobs:
 
       - name: Remove the trigger comment (keep PR clean)
         if: always() && steps.trigger.outputs.comment_id != ''
+        env:
+          GH_TOKEN: ${{ secrets.BUGBOT_TRIGGER_PAT }}   # same identity that created it
         run: |
           gh api -X DELETE "repos/$REPO/issues/comments/${{ steps.trigger.outputs.comment_id }}" \
             && echo "removed trigger comment" || echo "could not remove trigger comment"
