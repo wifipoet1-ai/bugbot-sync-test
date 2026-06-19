@@ -12,3 +12,7 @@ def shout(message):
 
 def whisper(message):
     return message.lower()
+
+
+def repeat(message, times):
+    return message * times
