@@ -1,0 +1,82 @@
+name: Bugbot Gate + Auto-approve
+
+# Triggers Cursor Bugbot on a PR, waits for its check-run, and auto-approves
+# when Bugbot passes (no issues). The trigger comment is removed afterward so it
+# doesn't clutter the PR conversation.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write   # approve the PR
+  issues: write          # create + delete the trigger comment
+  checks: read           # read the Bugbot check-run
+
+concurrency:
+  group: bugbot-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  bugbot-gate:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PR: ${{ github.event.pull_request.number }}
+      SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Timer (15s)
+        run: sleep 15
+
+      - name: Trigger Bugbot (capture comment id)
+        id: trigger
+        run: |
+          # post the trigger and grab the new comment's id from the API
+          before=$(gh api "repos/$REPO/issues/$PR/comments" --jq 'map(.id) | max // 0')
+          gh pr comment "$PR" --repo "$REPO" --body "bugbot run"
+          # find the comment we just made (the trigger text, id > before)
+          cid=$(gh api "repos/$REPO/issues/$PR/comments" \
+                 --jq "[.[] | select(.id > $before and (.body | test(\"^bugbot run\")))] | last | .id")
+          echo "comment_id=$cid" >> "$GITHUB_OUTPUT"
+          echo "Triggered Bugbot; trigger comment id=$cid"
+
+      - name: Wait for Cursor Bugbot check-run
+        id: wait
+        run: |
+          conclusion=""
+          for i in $(seq 1 40); do          # up to ~10 min (40 * 15s)
+            conclusion=$(gh api "repos/$REPO/commits/$SHA/check-runs" \
+              --jq '.check_runs[] | select(.name=="Cursor Bugbot" and .status=="completed") | .conclusion' \
+              | head -1)
+            if [ -n "$conclusion" ]; then
+              echo "Bugbot finished: $conclusion"
+              break
+            fi
+            echo "waiting for Bugbot check-run... ($i/40)"
+            sleep 15
+          done
+          echo "conclusion=${conclusion:-timeout}" >> "$GITHUB_OUTPUT"
+
+      - name: Remove the trigger comment (keep PR clean)
+        if: always() && steps.trigger.outputs.comment_id != ''
+        run: |
+          gh api -X DELETE "repos/$REPO/issues/comments/${{ steps.trigger.outputs.comment_id }}" \
+            && echo "removed trigger comment" || echo "could not remove trigger comment"
+
+      - name: Auto-approve when Bugbot passes
+        if: steps.wait.outputs.conclusion == 'success'
+        run: |
+          gh pr review "$PR" --repo "$REPO" --approve \
+            --body "✅ Auto-approved: Cursor Bugbot passed with no issues."
+          echo "approved"
+
+      - name: Block/flag when Bugbot found issues or timed out
+        if: steps.wait.outputs.conclusion != 'success'
+        run: |
+          echo "Not approving — Bugbot conclusion: ${{ steps.wait.outputs.conclusion }}"
+          gh pr comment "$PR" --repo "$REPO" \
+            --body "⚠️ Not auto-approved — Cursor Bugbot conclusion: \`${{ steps.wait.outputs.conclusion }}\` (review the findings above)."
+          # fail the job so the gate is visible as a red check
+          [ "${{ steps.wait.outputs.conclusion }}" = "timeout" ] && exit 1 || exit 1
